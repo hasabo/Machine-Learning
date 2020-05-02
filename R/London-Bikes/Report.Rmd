@@ -1,0 +1,428 @@
+# Objective
+
+Predicting the average total number of trips per hour across the week for unknown stations (not trained).
+
+
+# Census Dataset Acquistion 
+
+```{r}
+#Importing the census data csv file
+library(data.table)
+census = fread("data/London_census.csv", header = T,sep = ",", dec = ".")
+head(census)
+dim(census)
+uniqueN(census)
+uniqueN(census,by="WardName")
+uniqueN(census,by="borough")
+uniqueN(census,by="NESW")
+uniqueN(census,by="WardCode")
+```
+
+The census data has 625 rows and 20 variables. From unique variable analysis, we can
+use the WardCode as our primary key when joining tables
+
+
+# Census Data Preparation
+
+
+```{r}
+library(gridExtra)
+library(ggplot2)
+p1 = ggplot(census,aes(NoEmployee))+geom_histogram(aes(fill=NESW),bins = 20)
+p2 = ggplot(census,aes(MedHPrice))+geom_histogram(aes(fill=NESW),bins = 20)
+grid.arrange(p1, p2, nrow=2)
+```
+
+The No of Employees and Median House prices have outliers which mainly in the central 
+
+```{r}
+#creating the population metric 
+census$Pop = census$PopDen * census$AreaSqKm
+
+#Below independent variables have high correlation and provide the same information
+cor(census$NoDwelling,(census$NoFlats+census$NoHouses))
+cor(census$NoCTFtoH,census$MedHPrice)
+cor(census$Pop,(census$BornUK+census$NotBornUK))
+```
+```{r}
+#Droping the redundant columns
+census[,c("PopDen","NoCTFtoH","NoDwelling","Pop")]=NULL
+
+# Normalizing the skewed variables, NoEmployee and MedHPrices
+census$NoEmployee=log(census$NoEmployee)
+census$MedHPrice=log(census$MedHPrice)
+p1 = ggplot(census,aes(NoEmployee))+geom_histogram(aes(fill=NESW),bins = 20)
+p2 = ggplot(census,aes(MedHPrice))+geom_histogram(aes(fill=NESW),bins = 20)
+grid.arrange(p1, p2, nrow=2)
+```
+
+# Stations Data Acquisition
+
+```{r}
+#Importing the stations data csv file
+stations = fread("data/bike_stations.csv", header = T,sep = ",", dec = ".")
+head(stations)
+dim(stations)
+```
+
+The stations data have 773 stations and 5 variables describing the location and capacity of each station.
+
+# Merging the census and stations data Preparation
+
+```{r}
+#Visualizing the intersection of the census and stations
+ggplot(census,aes(x=lon,y=lat))+geom_point(col="red")+
+geom_point(data=stations,aes(x=Longitude,y=Latitude),col="blue",alpha=0.25)+labs(x = "Longitude", y = "Latitude", title = "London Ward centers in Red and Stations Coords in blue")
+```
+```{r}
+#Zooming in the intersection 
+ggplot(census,aes(x=lon,y=lat))+geom_point(col="red")+
+geom_point(data=stations,aes(x=Longitude,y=Latitude),col="blue",alpha=0.25)+
+xlim(range(stations$Longitude))+ylim(range(stations$Latitude))+labs(x = "Longitude", y = "Latitude", title = "London Ward centers in Red and Stations Coords in blue")
+```
+
+Using Kmeans with single iteration in order to find the nearest centroids which are the Ward centers coordinates that in trun will be assigned to the stations and hence the census and stations can have keys to merge.
+
+```{r}
+# creating a single data table from census and stations data 
+combined = rbind(census[,c("lon","lat")],stations[,c("Longitude","Latitude")],use.names=FALSE)
+
+clusters = kmeans(combined,combined[1:625,],iter.max = 1)
+
+#Assigning the nearest wardcode to the station name
+stations$Station_Name=census$WardCode[clusters$cluster[626:nrow(combined)]]
+
+#unique selected centroids for the stations
+c = unique(clusters$cluster[626:nrow(combined)])
+```
+
+## Viusalizing the selected centroids
+
+```{r}
+library(rgdal)
+library(sp)
+library(rgeos)
+
+#Using London_Ward shape file from london Government website in order to plot the ward boundaries
+m = readOGR(dsn=path.expand("./"), "London_Ward")
+
+# Transforming the coordinates to matach our data
+m.wgs84 = spTransform(m, CRS("+proj=longlat +datum=WGS84"))
+
+# Ploting 
+ggplot(m.wgs84)+geom_polygon(aes(x = long, y = lat, group = group), fill = "white", colour = "gray")+
+xlim(range(stations$Longitude))+ylim(range(stations$Latitude))+
+geom_point(data = census,aes(x=lon,y=lat),col="red")+
+geom_point(data=stations,aes(x=Longitude,y=Latitude),col="blue",alpha=0.25)+
+geom_point(data=census[c],aes(x=lon,y=lat),col="orange") +
+labs(x = "Longitude", y = "Latitude", title = "Part of London Map with Ward boundaires",
+subtitle = "Red dots for Ward Centers, Blue for Station Coords and Orange for the selected Ward Centers")
+
+```
+```{r}
+#merging the census and stations data by the cenus WardCode and the stations station_name which is #the WardCode for the chosen WardCenter
+merge1 = merge(census, stations, by.x="WardCode",by.y ="Station_Name")
+
+#Calculating the distances between the station coordinates and the selected ward centers
+library(geosphere)
+di= distHaversine(merge1[,c("lon","lat")],merge1[,c("Longitude","Latitude")],r = 6378)
+
+#Considering only single station for each ward center in order to overcome the repeated census data and reduce the stations belonging to a wrong ward issues.
+merge1$di = di
+merge1 = merge1 [order(di)]
+merge11 =merge1[!duplicated(WardCode)]
+head(merge11[,c("WardCode","Station_ID")])
+```
+
+ 113 out of 773 have been selected. They are the ones with least distance to Ward Centers.
+
+```{r}
+#Visualizing the final selected stations
+ggplot(m.wgs84)+geom_polygon(aes(x = long, y = lat, group = group), fill = "white", colour = "gray")+
+xlim(range(stations$Longitude))+ylim(range(stations$Latitude))+
+geom_point(data = merge11,aes(x=Longitude,y=Latitude),col="blue",alpha=0.25)+
+geom_point(data=census[c],aes(x=lon,y=lat),col="orange") +
+labs(x = "Longitude", y = "Latitude", title = "Part of London Map with Ward boundaires",
+subtitle = "Red dots for Ward Centers and Orange for the selected Ward Centers")
+```
+
+# Journeys Data Acquisition
+
+```{r}
+#Importing the journeys data scv file
+journeys = fread("data/bike_journeys.csv", header = T,sep = ",", dec = ".")
+head(journeys)
+dim(journeys)
+```
+
+1542844 obs with 14 features to describe each trip start, end and duration
+
+
+# Journeys Data Preparation
+
+```{r}
+
+# considering the start attributes as indicatior for the demand
+
+# Aggregate the number of trips per hour per station
+j1 = journeys[,.N,by=.(Start_Station_ID,Start_Year,Start_Month,Start_Date,Start_Hour)]
+
+# converting the data time attributes to the iso datetime format
+d = ISOdatetime(j1$Start_Year+2000,j1$Start_Month,j1$Start_Date,j1$Start_Hour, min = 0, sec=0, tz = "")
+
+#Extracting informative features like week of the year, day of the year,weekday and weekend
+p = as.POSIXlt(d)
+library(lubridate)
+j1$Station=j1$Start_Station_ID
+j1$Week=isoweek(p)
+j1$Day = p$yday
+j1$WeekDay=wday(p,label = TRUE,week_start = getOption("lubridate.week.start", 1))
+j1$Hour=hour(p)
+library(chron)
+j1$WeekEnd = as.integer(as.logical(is.weekend(p)))
+summary(j1)
+```
+
+The Aggregated trips per hour have skewed right distribution. The journeys happened in continuous 50 days across 8 weeks between 826 stations.
+
+## Time Series Analysis
+
+```{r}
+# Reshaping the data to be a valide input for time series function
+j2 = dcast(j1, Start_Year+Start_Month+Start_Date+Start_Hour~Start_Station_ID,value.var = "N")
+# Imp
+#Imputing the NA atriubutes due to no trips in some hours 
+j2[is.na(j2)]=0
+
+library(forecast)
+library(seasonal)
+library(rugarch)
+# Visualizing the multi-seasonal time series for random station considering the daily and weekely seasons with hour time slots.
+t = msts(j2$'129', seasonal.periods=c(24,168),ts.frequency=24,start=c(212,0))
+#visualizing the time series
+t %>% mstl(s.window="periodic", robust=TRUE) %>% autoplot(1) + xlab("Day")
+#Forecasting using seasonal decomposition 
+t %>%  stlf() %>% autoplot() + xlab("Day")
+```
+
+The seasonality across the one day interval is much stronger than one week interval.
+The Trend is almost steady. Forcasting the number of trips per hour per station can be
+done . However it varies from station to station which doesn't meet our main objective.
+
+```{r}
+#Visualizing the mean and sum of total trips per WeekDay of all stations over the total period of of our data, 50 days
+
+j3 = j1[,.(sum(N),mean(N)),by=.(Station,Week,WeekDay,Day)]
+p1 = ggplot(j3,aes(x=WeekDay,y=V1))+geom_col(fill="purple")+ylab("Sum")
+p2 = ggplot(j3,aes(x=WeekDay,y=V2))+geom_col(fill="violet")+ylab("Mean")
+grid.arrange(p1, p2, ncol=2)
+
+```
+
+Sum and Mean show simial distributing across the weekdays.
+
+```{r}
+#Visualizing the mean total of trips per WeekDay of all stations in every week our period.
+
+ggplot(j3,aes(x=WeekDay,y=V2))+geom_col(aes(fill = Week))+facet_wrap(~Week)
+```
+
+Some days like Tue in Week 31 and Wed in week 32 have significant variations from the rest of the days.
+
+```{r}
+#Visualizing the mean of total no trips per WeekDay of all stations in every hour 
+j4 = j1[,mean(N),.(Station,WeekDay,WeekEnd,Hour)]
+ggplot(j4,aes(x=WeekDay,y=V1))+geom_col(aes(fill = Hour))+facet_wrap(~Hour)
+```
+
+WeekDay*Hour seems to have a high predictive power. Weekends have more number of trips in the off peak hours.
+
+# Merging the three datasets
+
+```{r}
+# merging the three datasets
+merge2 = merge(j4, merge11, by.x="Station",by.y ="Station_ID")
+head(merge2)
+dim(merge2)
+length(unique(merge2$Station))
+```
+
+After merging the 113 stations which have unique census data, all of them have recorded trips.
+
+```{r}
+#Converting the NESW, weekday and hour  into categorical attributes.
+merge2$WeekDay=factor(merge2$WeekDay,ordered = FALSE)
+merge2$Hour=as.factor(merge2$Hour)
+merge2$WeekEnd=as.factor(merge2$WeekEnd)
+```
+
+```{r}
+#dropping the non predictive columns and the redundant ones 
+merge2[,c("WardCode","WardName","NESW","borough","lon","lat")]=NULL
+#Removing the null values
+merge2=merge2[complete.cases(merge2)]
+```
+
+
+# Machine Learning input Data Preparation
+
+
+```{r}
+
+#Standrdize the numerical independent features.
+bike=scale(merge2[,c("AreaSqKm","IncomeScor","LivingEnSc","NoEmployee","GrenSpace","BornUK","NotBornUK","NoFlats","NoHouses","NoOwndDwel","MedHPrice","Capacity","Longitude","Latitude")])
+
+#spliting the stations randomly betweem the training and test with prcentage 80 to 20
+library(dplyr)
+set.seed(20)
+bikeTrain = cbind(bike,merge2[,c("V1","WeekDay","WeekEnd","Hour","Station")])
+bike1Train = bikeTrain%>%subset(bikeTrain$Station%in%sample(unique(bikeTrain$Station),0.8*length(unique(bikeTrain$Station))))
+bikeTest  = cbind(bike,merge2[,c("V1","WeekDay","WeekEnd","Hour","Station")])
+bike1Test  = bikeTest %>%subset(!bikeTest$Station%in%unique(bike1Train$Station))
+length(unique(bike1Train$Station))
+length(unique(bike1Test$Station))
+#Dropping the Station ID which is not informative 
+bike1Train$Station = NULL
+bike1Test$Station=NULL
+```
+
+90 random stations will be used in training the models and other different 23 in testing 
+
+# Modelling
+
+## Linear Regression 
+
+```{r}
+#Creating a new DataTable for Performance Comparison
+perf = data.table()
+# Linear Modelling with the signifianctly predictive census features  
+linearModel = lm(V1 ~(WeekDay+Hour+AreaSqKm+IncomeScor+NoEmployee+GrenSpace+BornUK+NotBornUK+NoFlats+NoOwndDwel+MedHPrice+Capacity+Longitude+Latitude),data=bike1Train)
+
+summary(linearModel)
+
+perf$lm_pred = predict(linearModel,bike1Test)
+perf$lm_actual = (bike1Test[,"V1"])
+library(Metrics)
+library(MLmetrics)
+R2_Score(perf$lm_actual, perf$lm_pred)
+RMSE(perf$lm_actual, perf$lm_pred)
+head(perf$lm_pred)
+head(perf$lm_actual)
+
+
+```
+
+Census Data has low impact in explaining the number of trips variaitons.
+
+## Linear Regression With Regularization (Ridge)
+
+Input prepation to be a matrix instead of dataframe. x,y for training and x1,y1 for testing.
+
+```{r}
+library(caret)
+#Encoding the categorical attributes
+dmy = dummyVars(~.,data=bike1Train)
+trsf = data.frame(predict(dmy,newdata = bike1Train ))
+
+# Creating new features from the encoded variables based on the logic gates concept to reflect the variation of peak hours and it’s relation with the weekend
+
+#Holiday non peak hours
+trsf$HNP = (trsf$WeekDay.Sat+trsf$WeekDay.Sun)*(trsf$Hour.7+trsf$Hour.8)
+
+#Holiday peak hours
+trsf$HP = (trsf$WeekDay.Sat+trsf$WeekDay.Sun)*(trsf$Hour.11+trsf$Hour.12+trsf$Hour.13+trsf$Hour.14)
+
+# Non peak hours
+trsf$NP = trsf$Hour.0+trsf$Hour.1+trsf$Hour.2+trsf$Hour.3+trsf$Hour.4+trsf$Hour.5
+
+# peak hours
+trsf$P = trsf$Hour.7+trsf$Hour.8+trsf$Hour.17+trsf$Hour.18
+
+#Convert from DataFrame to Matrix
+y <- as.matrix( trsf[, "V1"] )
+x <- as.matrix( trsf[, names(trsf)[names(trsf)!="V1"]] )
+```
+# Correlation
+```{r}
+library(psych)
+mycorr = corr.test(trsf[,1:15],adjust = "fdr")
+library(corrplot)
+corr.test(trsf[,1:14],trsf[,15],adjust = "fdr")
+corrplot(mycorr$r,order = "hclust")
+```
+No of Employee has a agood correlation with the no of trips (V1)
+
+```{r}
+#Searching for optimum lambda that results in least cost 
+lambdas_to_try <- 10^seq(-3, 3, length.out = 100)
+library(glmnet)
+
+# Tuning lambda with 10 folds cross validation
+ridge_cv <- cv.glmnet(x, y, alpha = 0, lambda = lambdas_to_try, standardize = FALSE, nfolds = 10)
+
+# ploting lambda versus the mean square error
+plot(ridge_cv)
+lambda_ridge_cv <- ridge_cv$lambda.min
+
+#Model training using the optimum lambda
+model_ridge <- glmnet(x, y,  alpha = 0, lambda = lambda_ridge_cv,standardize = FALSE)
+
+
+#training prediction
+y_hat_ridge <- predict(model_ridge, x)
+
+#RSquared for training 
+rsq_ridge <- cor(y, y_hat_ridge)^2
+print(rsq_ridge)
+
+#Same data preparation for testing
+trsf1 = data.frame(predict(dmy,newdata = bike1Test ))
+trsf1$HNP = (trsf1$WeekDay.Sat+trsf1$WeekDay.Sun)*(trsf1$Hour.7+trsf1$Hour.8)
+trsf1$HP = (trsf1$WeekDay.Sat+trsf1$WeekDay.Sun)*(trsf1$Hour.11+trsf1$Hour.12+trsf1$Hour.13+trsf1$Hour.14)
+trsf1$NP = trsf1$Hour.0+trsf1$Hour.1+trsf1$Hour.2+trsf1$Hour.3+trsf1$Hour.4+trsf1$Hour.5
+trsf1$P = trsf1$Hour.7+trsf1$Hour.8+trsf1$Hour.17+trsf1$Hour.18
+y1 <- as.matrix( trsf1[, "V1"] )
+x1 <- as.matrix( trsf1[, names(trsf1)[names(trsf1)!="V1"]] )
+
+#testing prediction
+y1_hat_ridge <-predict(model_ridge, x1)
+
+#RSquared for testing 
+rsq_ridge <- cor(y1, y1_hat_ridge)^2
+print(rsq_ridge)
+head(y1)
+head(y1_hat_ridge)
+
+#Beta Coefficients 
+model_ridge$beta
+```
+Interpretation
+
+Number of trips increase in peak hours and decrease in off peaks. The geographic location for stations and ward center also have high impact on the number of trips.
+
+ Number of trips as expected increase with in areas with high Number of employees. Also, people who are not born in UK seem not to get used to ride bikes. 
+
+The Newly Engineered features have significant impact. Particularly the Weekend non peak hours(HNP). 
+
+
+```{r}
+set.seed(10)
+library(randomForest)
+bike.rf = randomForest(x,y)
+summary(bike.rf)
+perf$rf_pred = predict(bike.rf,x1)
+perf$rf_actual = (bike1Test[,"V1"])
+library(Metrics)
+library(MLmetrics)
+R2_Score(perf$rf_actual, perf$rf_pred)
+RMSE(perf$rf_actual, perf$rf_pred)
+head(perf$rf_pred)
+head(perf$rf_actual)
+bike.rf$importance
+
+```
+Hours and weekdays are the most informative attributes in decreasing the impurities. Number of Employee have a significant impact  as well on the average of number of trips per hour per station .
+
+# Summary
+
+Ridge has better performance with R2=0.26 on the testing set from linear model. Also, Random Forest has a good performance with R2=-0.09 and RMSE 1.2 on testing .

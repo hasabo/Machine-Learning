@@ -1,0 +1,191 @@
+---
+output:
+  pdf_document: default
+  html_document: default
+---
+-Objective:Understanding the reasons behind the major crimes and predicting where crimes may occur and therefore to prevent further occurrences.
+
+-Data Acquisition and Reshaping:
+
+-Two csv files
+-reading the first file which contain data about crime history from 2010 to 2018.
+
+```{r}
+library(data.table)
+setwd("/Users/islamhasabo/GitHub/crime")
+history=fread("MPS_Ward_Level_Crime_Historic_NewWard.csv", header = T,sep = ",", dec = ".")
+head(history)
+dim(history)
+str(history)
+```
+
+-Reshaping the data for the history file by converting the time columns to rows .
+
+```{r}
+h1=melt(history, id.vars=c("WardCode","WardName","Borough","MajorCategory","MinorCategory"))
+head(h1)
+dim(h1)
+str(h1)
+summary(h1)
+```
+
+-Reshaping the data by focusing on the major categories of crimes and aggregating the the number of crimes per month in each ward.
+
+```{r}
+h2=dcast(h1, WardCode+WardName+Borough+variable ~ MajorCategory,value.var = "value",fun=sum)
+head(h2)
+dim(h2)
+str(h2)
+summary(h2)
+```
+
+-reading the second file which contain the census data for 625 geographical units known as ward.
+
+```{r}
+census=fread("LondonCensus.csv", header = T,sep = ",", dec = ".")
+head(census)
+dim(census)
+str(census)
+summary(census)
+```
+
+-Joining the the reshaped history and census tables on WardCode after confirming most of the codes are available on both datasets.
+
+```{r}
+crime = merge(census, h2, by="WardCode", all=TRUE)
+head(crime)
+dim(crime)
+str(crime)
+summary(crime)
+```
+Hypothese:
+
+1-Highly Populated areas are expected to have higher crime rates.
+2-Areas Where Higher House Prices and Low income are expected to have higher crime rates.
+3-Areas with Low Quality of life also are likely to have higher number of crimes
+
+Data Cleaning:
+
+```{r}
+#Droping the repeated columns
+crime$borough = NULL
+crime$WardName.x = NULL
+```
+
+Removing the missing values by droping the non completed cases that is mainly due to non intersected ward codes
+
+```{r}
+crime[which(is.na(crime$lon),arr.ind=TRUE)]
+crime[which(is.na(crime$Burglary),arr.ind=TRUE)]
+crime=crime[complete.cases(crime)]
+head(crime)
+dim(crime)
+str(crime)
+summary(crime)
+```
+
+Splitting the date variable to year and month attributes.
+
+```{r}
+library(stringr)
+crime$time=str_split_fixed(crime$variable, "_", 2)[,2]
+crime$variable = NULL
+crime$time = gsub("(\\d{4})(\\d{2})$","\\1-\\2",crime$time)
+library(tidyr)
+crime = crime %>% separate('time', into = paste0('time', 30:31), sep = '[-]')
+crime$year = as.integer(crime$time30 )
+crime$month = as.integer(crime$time31 )
+crime$time30 = NULL
+crime$time31 = NULL
+```
+
+Considering the total number of crimes as the sum of all major categories and uing this new variable as the target attribute
+
+```{r}
+crime$NoCrimes = rowSums(crime[,c("Burglary","Criminal Damage","Drugs","Fraud or Forgery","Other Notifiable Offences","Robbery","Sexual Offences","Theft and Handling","Violence Against The Person")])
+crime[,c("Burglary","Criminal Damage","Drugs","Fraud or Forgery","Other Notifiable Offences","Robbery","Sexual Offences","Theft and Handling","Violence Against The Person")]=NULL
+```
+
+Adding Two new metrics to be used as measure for our hypotheses (Pop and HousePriceToIncomeRatio) and another one to remove the outliers in the NoEmployee attribute(Emp_Pcnt)
+
+```{r}
+crime$Pop=crime$PopDen*crime$AreaSqKm
+crime$Emp_Pcnt=crime$NoEmployee/crime$Pop
+crime$HousePriceToIncomeRatio=crime$IncomeScor*crime$MedHPrice
+```
+
+```{r}
+library(ggplot2)
+p = ggplot(crime[(crime$year==2016) & (crime$month==8)], aes(x=NESW, y=NoCrimes))
+p + geom_violin() + geom_boxplot(width=.2, fill="blue",col="red") 
+```
+
+Median Imputing for the non logical Number of Employee and Number of crimes
+
+```{r}
+library(outliers)
+crime$NoEmployee[crime$Emp_Pcnt[(crime$Emp_Pcnt>0.9) | (crime$Emp_Pcnt<0.1 )]]=median(crime$NoEmployee)
+crime$NoCrimes[scores(crime$NoCrimes, type="z", prob=0.9997)]=median(crime$NoCrimes)
+p = ggplot(crime[(crime$year==2016) & (crime$month==8)], aes(x=NESW, y=NoCrimes))
+p + geom_violin() + geom_boxplot(width=.2, fill="blue",col="red") 
+```
+Factoring non numeric attributes that can be used as input to the machine learning model 
+```{r}
+crime$NESW = as.factor(crime$NESW)
+```
+Transforming the non Normalized variables
+```{r}
+crime$HousePriceToIncomeRatio=log(crime$HousePriceToIncomeRatio)
+crime$NoEmployee=log(crime$NoEmployee)
+crime$MedHPrice=log(crime$MedHPrice)
+```
+Checking the Pearson Correlation between the No of Crimes and the other attributes.
+```{r}
+library(psych)
+corr.test(crime[, c("year","month","AreaSqKm","lon","lat","IncomeScor","LivingEnSc","NoEmployee","GrenSpace","PopDen","BornUK","NotBornUK","NoCTFtoH","NoDwelling","NoFlats","NoHouses","NoOwndDwel","MedHPrice","HousePriceToIncomeRatio","Pop" )],crime$NoCrimes,adjust = "fdr")
+```
+Visualizing the correlation
+```{r}
+library(corrplot)
+mycorr = corr.test(crime[, c("year","month","AreaSqKm","lon","lat","IncomeScor","LivingEnSc","NoEmployee","GrenSpace","PopDen","BornUK","NotBornUK","NoCTFtoH","NoDwelling","NoFlats","NoHouses","NoOwndDwel","MedHPrice","HousePriceToIncomeRatio","Pop","NoCrimes")])
+corrplot(mycorr$r,order = "hclust")
+```
+Visulaizing the highly correlated attributes taking into consideration the reasoning. For example Higly No of EmPloyee is due to High Nmber of Population
+
+
+```{r}
+mycorr1 = corr.test(crime[, c("AreaSqKm","lat","LivingEnSc","NotBornUK","HousePriceToIncomeRatio","Pop","NoCrimes")])
+corrplot.mixed(mycorr1$r)
+library(GGally)
+mycorr2 = crime[, c("AreaSqKm","lat","LivingEnSc","NotBornUK","HousePriceToIncomeRatio","Pop","NoCrimes")]
+ggpairs(mycorr2)
+```
+Data Interpetation:
+From the below Graph we can see People who are not born in uk which High in center and north which interpret the number of crimes increase with NotBornUK and lat.
+
+```{r}
+p = ggplot(crime[(crime$year==2016) & (crime$month==8)], aes(x=NESW, y=NoCrimes))
+p + geom_violin() + geom_boxplot(width=.2, fill="blue",col="red") +geom_jitter(width=.1,aes(col=cut(NotBornUK,breaks=3)))+scale_color_brewer(type='div', palette=7)
+```
+
+Modelling
+Using Linear Regression to predict the total number of crimes in a given ward, month and year.
+```{r}
+trainingRowIndex = sample(1:nrow(crime), 0.8*nrow(crime))
+crime1=scale(crime[,c("year","month","lon", "lat", "AreaSqKm","IncomeScor" , "LivingEnSc", "NoEmployee" , "GrenSpace" , "PopDen" , "BornUK" , "NotBornUK" ,"NoCTFtoH" , "NoDwelling" , "NoFlats", "NoHouses" , "NoOwndDwel" ,"MedHPrice" , "Pop" ,"HousePriceToIncomeRatio")])
+crime1Train = cbind(crime1,crime[,c("NESW","NoCrimes")])[trainingRowIndex, ]
+crime1Test  = cbind(crime1,crime[,c("NESW","NoCrimes")])[-trainingRowIndex, ]
+linearModel = lm(NoCrimes ~ (year+month+lat+lon+Pop+PopDen+AreaSqKm+HousePriceToIncomeRatio+NotBornUK+LivingEnSc+NoEmployee+NoDwelling+NoHouses+NoFlats+NoOwndDwel+BornUK+GrenSpace)^3, data=crime1Train)
+summary(linearModel)
+crime1Test$pred = predict(linearModel,crime1Test)
+crime1Test$actual = crime1Test[,"NoCrimes"]
+library(Metrics)
+library(MLmetrics)
+R2_Score(crime1Test$actual, crime1Test$pred)
+RMSE(crime1Test$actual,crime1Test$pred)
+head(crime1Test$pred)
+head(crime1Test$actual)
+ggplot(crime1Test,aes(x=actual, y=pred))+geom_point() +geom_smooth(method = "lm")
+```
+
+
